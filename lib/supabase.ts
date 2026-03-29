@@ -32,6 +32,15 @@ export type Search = {
   created_at: string
 }
 
+export type ScoreBreakdown = {
+  react: number
+  ai: number
+  stars: number
+  activity: number
+  bio: number
+  location: number
+}
+
 export type Candidate = {
   id: string
   search_id: string
@@ -42,6 +51,7 @@ export type Candidate = {
   bio: string | null
   location: string | null
   score: number
+  score_breakdown: ScoreBreakdown | null
   recent_activity: boolean
   created_at: string
 }
@@ -65,4 +75,17 @@ export type CandidateProject = {
 export type CandidateWithDetails = Candidate & {
   skills: string[]
   projects: CandidateProject[]
+}
+
+export type TalentPool = {
+  id: string
+  name: string
+  description: string | null
+  created_at: string
+}
+
+export type TalentPoolCandidate = {
+  pool_id: string
+  candidate_id: string
+  added_at: string
 }

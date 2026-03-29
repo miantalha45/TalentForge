@@ -4,6 +4,7 @@ export const maxDuration = 300 // 5 minutes — TinyFish needs time
 import { runTinyFish, type TinyFishEvent } from '@/lib/tinyfish'
 import { buildGitHubGoal, buildLinkedInGoal, type RawCandidate } from '@/lib/goals'
 import { scoreCandidate, rankCandidates, type ScoredCandidate } from '@/lib/scorer'
+import { enhanceQuery } from '@/lib/queryEnhancer'
 import { supabase } from '@/lib/supabase'
 
 // ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -21,7 +22,6 @@ async function persistCandidates(
   candidates: ScoredCandidate[]
 ): Promise<void> {
   for (const c of candidates) {
-    // Insert candidate row
     const { data: row, error } = await supabase
       .from('candidates')
       .insert({
@@ -33,6 +33,7 @@ async function persistCandidates(
         bio: c.bio ?? null,
         location: c.location ?? null,
         score: c.score,
+        score_breakdown: c.score_breakdown,
         recent_activity: c.recent_activity ?? false,
       })
       .select('id')
@@ -42,7 +43,6 @@ async function persistCandidates(
 
     const candidateId: string = row.id
 
-    // Insert skills
     const skills = (c.skills ?? []).filter(Boolean)
     if (skills.length > 0) {
       await supabase.from('candidate_skills').insert(
@@ -50,7 +50,6 @@ async function persistCandidates(
       )
     }
 
-    // Insert projects
     const projects = (c.projects ?? []).filter((p) => p.name)
     if (projects.length > 0) {
       await supabase.from('candidate_projects').insert(
@@ -78,18 +77,15 @@ function parseCandidates(result: Record<string, unknown> | null): RawCandidate[]
   console.log('[parseCandidates] raw result keys:', Object.keys(result))
   console.log('[parseCandidates] raw result:', JSON.stringify(result).slice(0, 500))
 
-  // TinyFish may return candidates directly, or nested under .candidates
   let candidates = result.candidates
 
-  // Handle case where TinyFish wraps output in a text/string field
   if (!candidates && typeof result.text === 'string') {
     try {
-      const parsed = JSON.parse(result.text)
+      const parsed = JSON.parse(result.text) as Record<string, unknown>
       candidates = parsed.candidates ?? parsed
     } catch { /* ignore */ }
   }
 
-  // Handle case where the result itself IS the candidates array
   if (!candidates && Array.isArray(result)) {
     candidates = result
   }
@@ -106,12 +102,16 @@ function parseCandidates(result: Record<string, unknown> | null): RawCandidate[]
 // ── Main route handler ────────────────────────────────────────────────────────
 
 export async function POST(request: Request) {
-  const body = await request.json() as { query?: string }
-  const query = body.query?.trim()
+  const body = await request.json() as { query?: string; skipEnhance?: boolean }
+  const rawQuery = body.query?.trim()
 
-  if (!query) {
+  if (!rawQuery) {
     return Response.json({ error: 'query is required' }, { status: 400 })
   }
+
+  // Enhance query unless caller opted out
+  const query = body.skipEnhance ? rawQuery : enhanceQuery(rawQuery)
+  const queryWasEnhanced = query !== rawQuery
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -119,6 +119,11 @@ export async function POST(request: Request) {
       const allCandidates: ScoredCandidate[] = []
 
       try {
+        // Inform client if query was enhanced
+        if (queryWasEnhanced) {
+          send('query_enhanced', { original: rawQuery, enhanced: query })
+        }
+
         // ── Create search record ───────────────────────────────────────────
         const { data: search } = await supabase
           .from('searches')
@@ -137,7 +142,6 @@ export async function POST(request: Request) {
           const githubResult = await runTinyFish(
             { url: githubGoal.url, goal: githubGoal.goal, browserProfile: 'lite' },
             (event: TinyFishEvent) => {
-              // streamingUrl arrives on its own STREAMING_URL event type, not on STARTED
               if (event.streamingUrl) {
                 send('streaming_url', { url: event.streamingUrl, platform: 'GitHub' })
               }
@@ -175,7 +179,6 @@ export async function POST(request: Request) {
           const linkedinResult = await runTinyFish(
             { url: linkedinGoal.url, goal: linkedinGoal.goal, browserProfile: 'stealth' },
             (event: TinyFishEvent) => {
-              // streamingUrl arrives on its own STREAMING_URL event type, not on STARTED
               if (event.streamingUrl) {
                 send('streaming_url', { url: event.streamingUrl, platform: 'LinkedIn' })
               }
@@ -221,6 +224,7 @@ export async function POST(request: Request) {
           candidates: ranked,
           total: ranked.length,
           searchId,
+          enhancedQuery: queryWasEnhanced ? query : null,
         })
       } catch (err) {
         console.error('[run-agent] Fatal error:', err)
